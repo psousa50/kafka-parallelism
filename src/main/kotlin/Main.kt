@@ -2,24 +2,24 @@ package com.psousa50
 
 import com.psousa50.kafka.MessageReceived
 import com.psousa50.kafka.SomeMessage
-import com.psousa50.kafka.createProducer
+import com.psousa50.kafka.SomeMessageConsumer
+import com.psousa50.kafka.SomeMessageProducer
 import com.psousa50.kafka.createTopic
+import com.psousa50.kafka.kafkaProperties
 import com.psousa50.kafka.prettyDuration
-import com.psousa50.kafka.startConsumer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
-import org.apache.kafka.clients.producer.ProducerRecord
 import java.util.concurrent.Executors
 
 const val NUMBER_OF_MESSAGES_TO_SEND = 10
 const val PROCESSING_TIME = 5000L
 const val NUMBER_OF_CONSUMERS = 2
-const val NUMBER_OF_PARTITIONS = 2
-const val NUMBER_OF_THREADS = 0
+const val NUMBER_OF_PARTITIONS = 10
+const val NUMBER_OF_GLOBAL_THREADS = 20
 
 fun main() = runBlocking {
 
@@ -34,7 +34,7 @@ fun main() = runBlocking {
         numberOfMessagesToSend = NUMBER_OF_MESSAGES_TO_SEND,
         processingTime = PROCESSING_TIME,
         numberOfConsumers = NUMBER_OF_CONSUMERS,
-        numberOfThreads = NUMBER_OF_THREADS,
+        numberOfThreads = NUMBER_OF_GLOBAL_THREADS,
     )
     val result = runSimulation(scenario)
 
@@ -54,40 +54,41 @@ fun main() = runBlocking {
 private suspend fun runSimulation(
     scenario: SimulationScenario,
 ) = with(scenario) {
-    val executor = lazy { Executors.newFixedThreadPool(NUMBER_OF_THREADS) }
+    val executor = lazy { Executors.newFixedThreadPool(NUMBER_OF_GLOBAL_THREADS) }
 
     val messageProcessor = MessageProcessor(processingTime)
     repeat(numberOfConsumers) {
-        CoroutineScope(Dispatchers.IO).launch {
-            startConsumer(
-                name = "$it",
-                groupId = groupId,
-                topic = topic,
-                executor = if (numberOfThreads > 0) executor.value else null,
-                processor = messageProcessor::processMessage
-            )
-        }
+        val consumer = SomeMessageConsumer(
+            bootstrapServer = kafkaProperties.BOOTSTRAP_SERVERS,
+            name = "$it",
+            groupId = groupId,
+            topic = topic,
+            executor = if (numberOfThreads > 0) executor.value else null,
+            processMessage = messageProcessor::processMessage
+        )
+        CoroutineScope(Dispatchers.IO).launch { consumer.start() }
     }
 
-    val producer = createProducer()
+    val producer = SomeMessageProducer(topic)
 
     repeat(numberOfMessagesToSend) {
         val message = SomeMessage(it.toString(), System.currentTimeMillis())
-        val record = ProducerRecord(topic, message.id, message)
-        producer.send(record)
+        producer.send(message)
         delay(50)
     }
 
     withTimeout(100000) {
         while (messageProcessor.count() < 9) {
-            println("Waiting for messages...${messageProcessor.count()}")
             delay(500)
         }
     }
 
     producer.close()
     if (executor.isInitialized()) executor.value.shutdown()
-    SimulationResult(messageProcessor.messages, messageProcessor.totalTime())
+    SimulationResult(
+        messages = messageProcessor.messages,
+        totalTime = messageProcessor.totalTime()
+    )
 }
 
 
